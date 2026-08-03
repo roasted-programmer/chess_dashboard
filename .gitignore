@@ -29,3 +29,7 @@ secrets/*
 # IDE Settings
 .vscode/
 .idea/
+
+# Sandbox
+sandbox/
+sandbox.*
