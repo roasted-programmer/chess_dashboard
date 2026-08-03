@@ -1,0 +1,31 @@
+# Python generated files and folders
+__pycache__/
+*.py[cod]
+.venv/
+
+# Files and data
+files/
+data/
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+
+# System Generated files
+.DS_Store
+
+# Secrets
+.env
+credentials.json
+credentials/*
+secrets.json
+secrets/*
+
+# Jupyter Notebook files
+.ipynb_checkpoints/
+
+# IDE Settings
+.vscode/
+.idea/
