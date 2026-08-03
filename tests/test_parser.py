@@ -2,13 +2,18 @@
 
 import pytest
 
-from src.chess_com.parser import parse_archive_year_month, parse_game, parse_pgn_headers
+from src.chess_com.parser import (
+    is_missing_link_tag,
+    parse_archive_year_month,
+    parse_game,
+    parse_pgn_headers,
+)
 
 SAMPLE_PGN = '''[Event "Live Chess"]
 [White "LindaW25"]
 [Black "donkaszak"]
 [Result "1-0"]
-[ECOUrl "https://www.chess.com/openings/Queen-s-Gambit-Declined-Exchange-Variation-5...Bc5-6.Nf3-Nc6-7.Bd3"]
+[Link "https://www.chess.com/game/live/172488671824"]
 [UTCDate "2026.08.03"]
 [UTCTime "18:47:29"]
 [WhiteElo "1638"]
@@ -30,18 +35,16 @@ def test_parse_pgn_headers():
     assert headers["White"] == "LindaW25"
     assert headers["Black"] == "donkaszak"
     assert headers["Result"] == "1-0"
+    assert headers["Link"] == "https://www.chess.com/game/live/172488671824"
     assert headers["UTCDate"] == "2026.08.03"
     assert headers["TimeControl"] == "180"
 
 
-def test_missing_optional_pgn_headers_do_not_fail():
+def test_missing_link_tag_is_rejected():
     minimal_pgn = '[White "alice"]\n\n1. e4 e5 1-0'
     game = {"uuid": "abc-123", "pgn": minimal_pgn}
-    parsed = parse_game(game)
-    assert parsed is not None
-    assert parsed["white_username"] == "alice"
-    assert parsed["black_username"] == ""
-    assert parsed["rules"] == ""
+    assert is_missing_link_tag(game)
+    assert parse_game(game) is None
 
 
 def test_game_missing_uuid_is_rejected():
@@ -67,13 +70,14 @@ def test_parse_game_normalized_structure():
     assert parsed["black_username"] == "donkaszak"
     assert parsed["result"] == "1-0"
     assert parsed["rules"] == "chess"
+    assert parsed["game_url"] == "https://www.chess.com/game/live/172488671824"
     assert parsed["pgn"] == SAMPLE_PGN
 
 
 def test_rules_comes_from_api_game_object():
     game = {
         "uuid": "abc-123",
-        "pgn": '[Variant "Chess960"]\n\n1. e4 1-0',
+        "pgn": '[Link "https://www.chess.com/game/live/1"]\n\n1. e4 1-0',
         "rules": "chess960",
     }
     parsed = parse_game(game)

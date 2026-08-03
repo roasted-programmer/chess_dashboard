@@ -13,7 +13,7 @@ PGN_FIELD_MAP = {
     "White": "white_username",
     "Black": "black_username",
     "Result": "result",
-    "ECOUrl": "eco_url",
+    "Link": "game_url",
     "UTCDate": "utc_date",
     "UTCTime": "utc_time",
     "WhiteElo": "white_elo",
@@ -60,6 +60,17 @@ def parse_pgn_headers(pgn_text: str) -> Dict[str, str]:
     return headers
 
 
+def is_missing_link_tag(game: Dict[str, Any]) -> bool:
+    """Check whether a game PGN is missing the required Link tag."""
+    pgn = game.get("pgn")
+    if not pgn or not str(pgn).strip():
+        link_missing = False
+        return link_missing
+    headers = parse_pgn_headers(pgn)
+    link_missing = not headers.get("Link", "").strip()
+    return link_missing
+
+
 def parse_game(game: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """Normalize a Chess.com game into a consistent dictionary.
 
@@ -94,6 +105,12 @@ def parse_game(game: Dict[str, Any]) -> Optional[Dict[str, str]]:
         if not value and field_name == "time_control":
             value = str(game.get("time_control") or "")
         normalized[field_name] = value
+
+    game_url = normalized.get("game_url", "").strip()
+    if not game_url:
+        logger.warning("Rejecting game %s: missing Link tag in PGN", uuid)
+        parsed_game = None
+        return parsed_game
 
     rules = game.get("rules")
     if rules is None:

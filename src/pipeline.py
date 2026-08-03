@@ -56,6 +56,8 @@ def process_game(
 
     parsed = parser.parse_game(game)
     if parsed is None:
+        if parser.is_missing_link_tag(game):
+            games.save_missing_link_pgn(game, year, month)
         game_processed = False
         return game_processed
 

@@ -3,7 +3,7 @@
 import csv
 import logging
 from pathlib import Path
-from typing import Dict, Set
+from typing import Any, Dict, Set
 
 from src.config import CSV_DIR, DATA_DIR, METADATA_DIR, PGN_DIR
 
@@ -15,7 +15,7 @@ CSV_COLUMNS = [
     "black_username",
     "result",
     "rules",
-    "eco_url",
+    "game_url",
     "utc_date",
     "utc_time",
     "white_elo",
@@ -26,6 +26,7 @@ CSV_COLUMNS = [
 ]
 
 GAMES_CSV_PATH = CSV_DIR / "games.csv"
+MISSING_LINK_DIR = DATA_DIR / "temp" / "missing-link"
 
 _csv_uuids = None
 
@@ -204,3 +205,22 @@ def append_game_csv(game_data: Dict[str, str], year: int, month: int) -> Path:
     logger.info("Appended game to CSV: %s", uuid)
     updated_csv_path = GAMES_CSV_PATH
     return updated_csv_path
+
+
+def save_missing_link_pgn(game: Dict[str, Any], year: int, month: int) -> Path:
+    """Save a PGN file for a game missing the required Link tag.
+
+    Args:
+        game (Dict[str, str]): Raw game payload including PGN text.
+        year (int): Archive year.
+        month (int): Archive month.
+
+    Returns:
+        saved_path (Path): Path to the saved PGN file in the missing-link folder.
+    """
+    MISSING_LINK_DIR.mkdir(parents=True, exist_ok=True)
+    uuid = str(game.get("uuid", "unknown")).strip()
+    saved_path = MISSING_LINK_DIR / f"{year:04d}-{month:02d}-{uuid}.pgn"
+    saved_path.write_text(game.get("pgn", ""), encoding="utf-8")
+    logger.warning("Saved game with missing Link tag for review: %s", saved_path)
+    return saved_path

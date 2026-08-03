@@ -9,12 +9,21 @@ from src.config import ConfigurationError, _load_player
 from src.local_storage import games, metadata
 from src.pipeline import process_month, run_pipeline, select_archive_urls
 
+SAMPLE_PGN_WITH_LINK = (
+    '[White "w"]\n'
+    '[Link "https://www.chess.com/game/live/1234567890"]\n\n'
+    "1. e4 1-0"
+)
+
 
 def _patch_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(games, "DATA_DIR", tmp_path / "data")
     monkeypatch.setattr(games, "PGN_DIR", tmp_path / "data" / "pgns")
     monkeypatch.setattr(games, "CSV_DIR", tmp_path / "data" / "csv")
     monkeypatch.setattr(games, "GAMES_CSV_PATH", tmp_path / "data" / "csv" / "games.csv")
+    monkeypatch.setattr(
+        games, "MISSING_LINK_DIR", tmp_path / "data" / "temp" / "missing-link"
+    )
     monkeypatch.setattr(metadata, "METADATA_DIR", tmp_path / "data" / "metadata")
     monkeypatch.setattr(
         metadata, "MASTER_METADATA_PATH", tmp_path / "data" / "metadata" / "master.json"
@@ -79,7 +88,7 @@ def test_current_month_remains_updateable(tmp_path, monkeypatch):
     archive_url = "https://api.chess.com/pub/player/test/games/2026/08"
     sample_game = {
         "uuid": "new-game-uuid",
-        "pgn": '[White "a"]\n\n1. e4 1-0',
+        "pgn": SAMPLE_PGN_WITH_LINK,
     }
 
     with patch(
@@ -103,7 +112,7 @@ def test_existing_uuid_is_skipped(tmp_path, monkeypatch):
 
     sample_game = {
         "uuid": "existing-uuid",
-        "pgn": '[White "a"]\n\n1. e4 1-0',
+        "pgn": SAMPLE_PGN_WITH_LINK,
     }
 
     with patch(
@@ -115,6 +124,28 @@ def test_existing_uuid_is_skipped(tmp_path, monkeypatch):
 
     assert result["skipped_games"] == 1
     assert result["failed"] == 0
+
+
+def test_game_missing_link_is_saved_for_review(tmp_path, monkeypatch):
+    _patch_storage(tmp_path, monkeypatch)
+    games.ensure_data_directories()
+
+    archive_url = "https://api.chess.com/pub/player/test/games/2026/08"
+    sample_game = {
+        "uuid": "missing-link-game",
+        "pgn": '[White "a"]\n\n1. e4 1-0',
+    }
+
+    with patch(
+        "src.pipeline.client.get_monthly_games", return_value=[sample_game]
+    ):
+        result = process_month(archive_url, 2026, 8, "test")
+
+    assert result["failed"] == 1
+    missing_link_path = (
+        tmp_path / "data" / "temp" / "missing-link" / "2026-08-missing-link-game.pgn"
+    )
+    assert missing_link_path.is_file()
 
 
 def test_api_requests_include_required_headers():
@@ -153,7 +184,7 @@ def test_run_pipeline_skips_older_months_with_master(tmp_path, monkeypatch):
     ]
     sample_game = {
         "uuid": "pipeline-game",
-        "pgn": '[White "w"]\n\n1. e4 1-0',
+        "pgn": SAMPLE_PGN_WITH_LINK,
     }
 
     with patch("src.pipeline.client.get_archive_urls", return_value=archives):
@@ -183,7 +214,7 @@ def test_run_pipeline_processes_gap_months(tmp_path, monkeypatch):
     ]
     sample_game = {
         "uuid": "pipeline-game",
-        "pgn": '[White "w"]\n\n1. e4 1-0',
+        "pgn": SAMPLE_PGN_WITH_LINK,
     }
 
     with patch("src.pipeline.client.get_archive_urls", return_value=archives):
@@ -206,7 +237,7 @@ def test_run_pipeline_integration(tmp_path, monkeypatch):
     archives = ["https://api.chess.com/pub/player/test/games/2026/08"]
     sample_game = {
         "uuid": "pipeline-game",
-        "pgn": '[White "w"]\n\n1. e4 1-0',
+        "pgn": SAMPLE_PGN_WITH_LINK,
     }
 
     with patch("src.pipeline.client.get_archive_urls", return_value=archives):
