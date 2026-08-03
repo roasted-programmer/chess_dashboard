@@ -1,7 +1,6 @@
-"""Tests for monthly metadata persistence."""
+"""Tests for monthly and master metadata persistence."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -11,6 +10,7 @@ from src.local_storage import metadata
 @pytest.fixture
 def metadata_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(metadata, "METADATA_DIR", tmp_path)
+    monkeypatch.setattr(metadata, "MASTER_METADATA_PATH", tmp_path / "master.json")
     return tmp_path
 
 
@@ -61,4 +61,24 @@ def test_atomic_metadata_write(metadata_dir):
     metadata.save_month_metadata(data)
 
     assert path.read_text(encoding="utf-8") != original
+    assert not list(metadata_dir.glob("*.tmp"))
+
+
+def test_master_metadata_save_and_load(metadata_dir):
+    master = metadata.create_master_metadata()
+    metadata.update_master_metadata(master, 2026, 8)
+    metadata.save_master_metadata(master)
+
+    loaded = metadata.load_master_metadata()
+    assert loaded is not None
+    assert loaded["last_metadata_year"] == 2026
+    assert loaded["last_metadata_month"] == 8
+    assert loaded["last_metadata_file"] == "2026-08"
+    assert loaded["last_run_at"] is not None
+
+
+def test_master_metadata_atomic_write(metadata_dir):
+    master = metadata.create_master_metadata()
+    metadata.update_master_metadata(master, 2026, 7)
+    metadata.save_master_metadata(master)
     assert not list(metadata_dir.glob("*.tmp"))

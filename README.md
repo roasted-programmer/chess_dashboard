@@ -28,15 +28,18 @@ The application creates data under:
 
 ```text
 data/pgns/       # one PGN file per game
-data/csv/        # one CSV file per game
-data/metadata/   # one JSON file per month
+data/csv/        # games.csv (all games appended incrementally)
+data/metadata/   # master.json plus one JSON file per month
 ```
 
 ## Behavior
 
-- **Historical months** (before the current UTC month) are skipped once marked complete in metadata.
-- **The current UTC month** is always refreshed so new games can be added incrementally.
-- **Game UUIDs** are recorded in metadata only after both PGN and CSV files are written successfully.
+- **`data/metadata/master.json`** tracks the last UTC run time and the last processed year-month.
+- On each run, only archives from the last executed month (inclusive) through the current UTC month are requested.
+- When the current month equals the last executed month, only that month is refreshed.
+- When the current month is later, every month from the last executed through the current month is processed to catch gaps.
+- At startup the pipeline reads only **master.json** and the last executed month metadata file to determine what to process.
+- **Game UUIDs** are recorded in monthly metadata only after the PGN file is stored and the game row is appended to `games.csv`.
 - **Metadata files** are saved atomically to support safe resumption after interruption.
 
 ## Tests
