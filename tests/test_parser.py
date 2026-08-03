@@ -41,7 +41,7 @@ def test_missing_optional_pgn_headers_do_not_fail():
     assert parsed is not None
     assert parsed["white_username"] == "alice"
     assert parsed["black_username"] == ""
-    assert parsed["variant"] == ""
+    assert parsed["rules"] == ""
 
 
 def test_game_missing_uuid_is_rejected():
@@ -59,10 +59,23 @@ def test_parse_game_normalized_structure():
         "uuid": "c75ab801-8f6b-11f1-bf80-6a5c6501000f",
         "pgn": SAMPLE_PGN,
         "time_control": "180",
+        "rules": "chess",
     }
     parsed = parse_game(game)
     assert parsed["uuid"] == "c75ab801-8f6b-11f1-bf80-6a5c6501000f"
     assert parsed["white_username"] == "LindaW25"
     assert parsed["black_username"] == "donkaszak"
     assert parsed["result"] == "1-0"
+    assert parsed["rules"] == "chess"
     assert parsed["pgn"] == SAMPLE_PGN
+
+
+def test_rules_comes_from_api_game_object():
+    game = {
+        "uuid": "abc-123",
+        "pgn": '[Variant "Chess960"]\n\n1. e4 1-0',
+        "rules": "chess960",
+    }
+    parsed = parse_game(game)
+    assert parsed is not None
+    assert parsed["rules"] == "chess960"

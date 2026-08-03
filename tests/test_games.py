@@ -24,7 +24,7 @@ def _sample_game(uuid: str = "game-1") -> dict[str, str]:
         "white_username": "alice",
         "black_username": "bob",
         "result": "1-0",
-        "variant": "",
+        "rules": "chess",
         "eco_url": "",
         "utc_date": "2026.08.03",
         "utc_time": "12:00:00",

@@ -14,7 +14,7 @@ CSV_COLUMNS = [
     "white_username",
     "black_username",
     "result",
-    "variant",
+    "rules",
     "eco_url",
     "utc_date",
     "utc_time",

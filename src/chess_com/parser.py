@@ -13,7 +13,6 @@ PGN_FIELD_MAP = {
     "White": "white_username",
     "Black": "black_username",
     "Result": "result",
-    "Variant": "variant",
     "ECOUrl": "eco_url",
     "UTCDate": "utc_date",
     "UTCTime": "utc_time",
@@ -95,6 +94,13 @@ def parse_game(game: Dict[str, Any]) -> Optional[Dict[str, str]]:
         if not value and field_name == "time_control":
             value = str(game.get("time_control") or "")
         normalized[field_name] = value
+
+    rules = game.get("rules")
+    if rules is None:
+        rules = ""
+    else:
+        rules = str(rules).strip()
+    normalized["rules"] = rules
 
     parsed_game = normalized
     return parsed_game
