@@ -5,7 +5,7 @@ __pycache__/
 
 # Files and data
 files/
-data/
+/data/
 
 # Distribution / packaging
 .Python

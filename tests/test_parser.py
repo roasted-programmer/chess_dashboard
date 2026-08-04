@@ -2,7 +2,9 @@
 
 import pytest
 
+from src.chess_com.openings import split_opening
 from src.chess_com.parser import (
+    extract_opening_from_eco_url,
     is_missing_link_tag,
     parse_archive_year_month,
     parse_game,
@@ -22,6 +24,18 @@ SAMPLE_PGN = '''[Event "Live Chess"]
 [Termination "LindaW25 won by resignation"]
 
 1. d4 d5 2. c4 e6 1-0
+'''
+
+SAMPLE_PGN_WITH_ECO_URL = '''[Event "Live Chess"]
+[White "Supersonic_Whisper"]
+[Black "LindaW25"]
+[Result "1-0"]
+[ECOUrl "https://www.chess.com/openings/Bishops-Opening-2...Nc6"]
+[Link "https://www.chess.com/game/live/2903831481"]
+[UTCDate "2018.06.27"]
+[UTCTime "08:19:18"]
+
+1. e4 e5 2. Bc4 Nc6 1-0
 '''
 
 
@@ -71,7 +85,131 @@ def test_parse_game_normalized_structure():
     assert parsed["result"] == "1-0"
     assert parsed["rules"] == "chess"
     assert parsed["game_url"] == "https://www.chess.com/game/live/172488671824"
+    assert parsed["opening"] == ""
     assert parsed["pgn"] == SAMPLE_PGN
+
+
+def test_extract_opening_from_eco_url():
+    assert extract_opening_from_eco_url(
+        "https://www.chess.com/openings/Bishops-Opening-2...Nc6"
+    ) == "Bishops Opening 2...Nc6"
+    assert extract_opening_from_eco_url(
+        "https://www.chess.com/openings/Modern-Defense-with-1-e4-2.d4-d6-3.f4-Bg7"
+    ) == "Modern Defense with 1 e4 2.d4 d6 3.f4 Bg7"
+    assert extract_opening_from_eco_url("") == ""
+    assert extract_opening_from_eco_url("https://example.com/openings/Foo") == ""
+
+
+def test_opening_extracted_for_standard_chess():
+    game = {
+        "uuid": "2b9d6fda-7ac9-11e3-8000-000000010001",
+        "pgn": SAMPLE_PGN_WITH_ECO_URL,
+        "rules": "chess",
+    }
+    parsed = parse_game(game)
+    assert parsed["opening"] == "Bishops Opening 2...Nc6"
+    assert parsed["main_opening"] == "Bishops Opening"
+    assert parsed["opening_variant"] == ""
+    assert parsed["opening_subvariant"] == "2...Nc6"
+
+
+def test_opening_blank_for_non_standard_chess():
+    pgn = (
+        '[Link "https://www.chess.com/game/live/3073171177"]\n'
+        '[ECOUrl "https://www.chess.com/openings/Some-Opening"]\n\n'
+        "1. e4 1-0"
+    )
+    game = {"uuid": "abc-123", "pgn": pgn, "rules": "chess960"}
+    parsed = parse_game(game)
+    assert parsed["opening"] == ""
+    assert parsed["main_opening"] == ""
+    assert parsed["opening_variant"] == ""
+    assert parsed["opening_subvariant"] == ""
+
+
+def test_opening_blank_when_eco_url_missing():
+    game = {
+        "uuid": "abc-123",
+        "pgn": SAMPLE_PGN,
+        "rules": "chess",
+    }
+    parsed = parse_game(game)
+    assert parsed["opening"] == ""
+    assert parsed["main_opening"] == ""
+    assert parsed["opening_variant"] == ""
+    assert parsed["opening_subvariant"] == ""
+
+
+def test_split_opening_sicilian_variants():
+    assert split_opening("Sicilian Defense Bowdler Attack") == (
+        "Sicilian Defense",
+        "Bowdler Attack",
+        "",
+    )
+    assert split_opening(
+        "Sicilian Defense Old Sicilian Variation 3.Bc4 e6"
+    ) == ("Sicilian Defense", "Old Sicilian Variation", "3.Bc4 e6")
+    assert split_opening("Sicilian Defense") == ("Sicilian Defense", "", "")
+
+
+def test_split_opening_moves_keep_api_castling():
+    assert split_opening("Ruy Lopez Opening Old Steinitz Defense 4.O O") == (
+        "Ruy Lopez Opening",
+        "Old Steinitz Defense",
+        "4.O O",
+    )
+    assert split_opening("Pirc Defense Main Line 4.h3 Bg7 5.Be3 O O") == (
+        "Pirc Defense",
+        "Main Line",
+        "4.h3 Bg7 5.Be3 O O",
+    )
+    assert split_opening("Sicilian Defense Old Sicilian Variation 3.Bc4 e6 4.O O") == (
+        "Sicilian Defense",
+        "Old Sicilian Variation",
+        "3.Bc4 e6 4.O O",
+    )
+
+
+def test_split_opening_preserves_move_ellipsis():
+    assert split_opening("Bishops Opening 2...Nc6") == (
+        "Bishops Opening",
+        "",
+        "2...Nc6",
+    )
+
+
+def test_split_opening_family_ellipsis_boundary():
+    assert split_opening("Owens Defense...3.Nc3 e6 4.Bd3 Bb4") == (
+        "Owens Defense",
+        "",
+        "3.Nc3 e6 4.Bd3 Bb4",
+    )
+
+
+def test_split_opening_ruy_lopez_and_queens_gambit():
+    assert split_opening("Ruy Lopez Opening Classical Defense") == (
+        "Ruy Lopez Opening",
+        "Classical Defense",
+        "",
+    )
+    assert split_opening("Queens Gambit Declined Exchange Variation") == (
+        "Queens Gambit Declined",
+        "Exchange Variation",
+        "",
+    )
+
+
+def test_split_opening_undefined_is_blank():
+    assert split_opening("Undefined") == ("", "", "")
+
+
+def test_extract_opening_keeps_api_castling():
+    assert extract_opening_from_eco_url(
+        "https://www.chess.com/openings/Ruy-Lopez-Opening-Old-Steinitz-Defense-4.O-O"
+    ) == "Ruy Lopez Opening Old Steinitz Defense 4.O O"
+    assert extract_opening_from_eco_url(
+        "https://www.chess.com/openings/Sicilian-Defense-Open-Dragon-Variation-6.Bc4-Bg7-7.O-O-O-O"
+    ) == "Sicilian Defense Open Dragon Variation 6.Bc4 Bg7 7.O O O O"
 
 
 def test_rules_comes_from_api_game_object():

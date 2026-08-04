@@ -4,10 +4,14 @@ import logging
 import re
 from typing import Any, Dict, Optional, Tuple
 
+from src.chess_com.openings import split_opening
+
 logger = logging.getLogger(__name__)
 
 ARCHIVE_URL_PATTERN = re.compile(r"/games/(\d{4})/(\d{2})$")
 PGN_TAG_PATTERN = re.compile(r'^\[(\w+)\s+"((?:[^"\\]|\\.)*)"\]', re.MULTILINE)
+CHESS_OPENINGS_URL_PREFIX = "https://www.chess.com/openings/"
+STANDARD_CHESS_RULES = "chess"
 
 PGN_FIELD_MAP = {
     "White": "white_username",
@@ -71,6 +75,28 @@ def is_missing_link_tag(game: Dict[str, Any]) -> bool:
     return link_missing
 
 
+def extract_opening_from_eco_url(eco_url: str) -> str:
+    """Extract a human-readable opening name from a Chess.com ECOUrl tag value.
+
+    Args:
+        eco_url (str): Opening URL from the PGN ECOUrl header tag.
+
+    Returns:
+        opening (str): Opening name derived from the URL slug, or an empty string
+            when the URL is missing or not a Chess.com openings link.
+    """
+    eco_url = eco_url.strip()
+    if not eco_url.startswith(CHESS_OPENINGS_URL_PREFIX):
+        opening = ""
+        return opening
+    slug = eco_url[len(CHESS_OPENINGS_URL_PREFIX) :].strip("/")
+    if not slug:
+        opening = ""
+        return opening
+    opening = slug.replace("-", " ")
+    return opening
+
+
 def parse_game(game: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """Normalize a Chess.com game into a consistent dictionary.
 
@@ -118,6 +144,18 @@ def parse_game(game: Dict[str, Any]) -> Optional[Dict[str, str]]:
     else:
         rules = str(rules).strip()
     normalized["rules"] = rules
+
+    if rules == STANDARD_CHESS_RULES:
+        eco_url = headers.get("ECOUrl", "")
+        opening = extract_opening_from_eco_url(eco_url)
+    else:
+        opening = ""
+    normalized["opening"] = opening
+
+    main_opening, opening_variant, opening_subvariant = split_opening(opening)
+    normalized["main_opening"] = main_opening
+    normalized["opening_variant"] = opening_variant
+    normalized["opening_subvariant"] = opening_subvariant
 
     parsed_game = normalized
     return parsed_game
