@@ -2,11 +2,12 @@
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src import config
 from src.chess_com import client, parser
-from src.local_storage import games, metadata
+from src.gcp import bigquery as bq
+from src.gcp import gcs
 
 logger = logging.getLogger(__name__)
 
@@ -43,29 +44,144 @@ def process_game(
 
     uuid = str(uuid).strip()
 
-    if metadata.is_game_processed(month_metadata, uuid):
+    if gcs.is_game_processed(month_metadata, uuid):
         logger.debug("Skipping already processed game: %s", uuid)
         game_processed = True
         return game_processed
 
-    if games.game_files_exist(uuid, year, month):
+    if bq.game_artifacts_exist(uuid, year, month):
         logger.debug("Skipping already stored game: %s", uuid)
-        metadata.record_processed_game(month_metadata, uuid)
+        gcs.record_processed_game(month_metadata, uuid)
         game_processed = True
         return game_processed
 
     parsed = parser.parse_game(game)
     if parsed is None:
         if parser.is_missing_link_tag(game):
-            games.save_missing_link_pgn(game, year, month)
+            gcs.save_missing_link_pgn(game, year, month)
         game_processed = False
         return game_processed
 
-    games.write_pgn_file(parsed, year, month)
-    games.append_game_csv(parsed, year, month)
-    metadata.record_processed_game(month_metadata, uuid)
+    try:
+        gcs.upload_pgn(parsed, year, month)
+        bq.insert_game(parsed, year, month)
+    except Exception:
+        logger.exception("Failed cloud write for game %s", uuid)
+        game_processed = False
+        return game_processed
+
+    gcs.record_processed_game(month_metadata, uuid)
     game_processed = True
     return game_processed
+
+
+def _partition_raw_games(
+    monthly_games: List[Dict[str, Any]],
+    month_metadata: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]:
+    """Split raw games into skipped, missing-link, and candidate buckets."""
+    missing_link_games = []
+    candidate_games = []
+    skipped_games = 0
+    for game in monthly_games:
+        uuid = game.get("uuid")
+        if not uuid or not str(uuid).strip():
+            logger.warning("Skipping invalid game: missing uuid")
+            continue
+        uuid = str(uuid).strip()
+        if gcs.is_game_processed(month_metadata, uuid):
+            skipped_games += 1
+            continue
+        pgn = game.get("pgn")
+        if not pgn or not str(pgn).strip():
+            logger.warning("Skipping game %s: missing pgn", uuid)
+            continue
+        if parser.is_missing_link_tag(game):
+            missing_link_games.append(game)
+            continue
+        candidate_games.append(game)
+    return missing_link_games, candidate_games, skipped_games
+
+
+def _parse_candidate_games(
+    candidate_games: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, str]], int]:
+    """Parse candidate games and count parse failures."""
+    parsed_games = []
+    parse_failures = 0
+    for game in candidate_games:
+        parsed = parser.parse_game(game)
+        if parsed is None:
+            parse_failures += 1
+            continue
+        parsed_games.append(parsed)
+    return parsed_games, parse_failures
+
+
+def _persist_parsed_games(
+    parsed_games: List[Dict[str, str]],
+    month_metadata: Dict[str, Any],
+    year: int,
+    month: int,
+) -> Tuple[int, int]:
+    """Upload PGNs concurrently and insert BigQuery rows in batches."""
+    if not parsed_games:
+        processed = 0
+        failed = 0
+        return processed, failed
+
+    uuids = []
+    for game in parsed_games:
+        uuids.append(game["uuid"])
+
+    existing_pgn_uuids = gcs.list_existing_pgn_uuids(year, month)
+    existing_bq_uuids = bq.existing_uuids(uuids)
+
+    already_complete = []
+    games_needing_pgn = []
+    games_needing_bq = []
+    for game in parsed_games:
+        uuid = game["uuid"]
+        pgn_ready = uuid in existing_pgn_uuids
+        bq_ready = uuid in existing_bq_uuids
+        if pgn_ready and bq_ready:
+            already_complete.append(uuid)
+            continue
+        if not pgn_ready:
+            games_needing_pgn.append(game)
+        if not bq_ready:
+            games_needing_bq.append(game)
+
+    for uuid in already_complete:
+        gcs.record_processed_game(month_metadata, uuid)
+
+    pgn_ok_uuids = gcs.upload_pgns_concurrent(games_needing_pgn, year, month)
+    for game in games_needing_bq:
+        uuid = game["uuid"]
+        if uuid in existing_pgn_uuids:
+            pgn_ok_uuids.add(uuid)
+
+    bq_candidates = []
+    for game in games_needing_bq:
+        if game["uuid"] in pgn_ok_uuids:
+            bq_candidates.append(game)
+
+    bq_ok_uuids = bq.insert_games(bq_candidates, year, month)
+
+    newly_complete = []
+    for game in parsed_games:
+        uuid = game["uuid"]
+        if uuid in already_complete:
+            continue
+        pgn_ok = uuid in pgn_ok_uuids or uuid in existing_pgn_uuids
+        bq_ok = uuid in bq_ok_uuids or uuid in existing_bq_uuids
+        if pgn_ok and bq_ok:
+            newly_complete.append(uuid)
+            gcs.record_processed_game(month_metadata, uuid)
+
+    processed = len(already_complete) + len(newly_complete)
+    failed = len(parsed_games) - processed
+    return processed, failed
 
 
 def process_month(
@@ -75,7 +191,7 @@ def process_month(
     player: str,
     month_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, int]:
-    """Process one monthly archive.
+    """Process one monthly archive using batched GCS and BigQuery writes.
 
     Args:
         archive_url (str): Chess.com monthly archive URL.
@@ -91,34 +207,36 @@ def process_month(
     is_current_month = (year, month) == (current_year, current_month)
 
     if month_metadata is None:
-        month_metadata = metadata.ensure_month_metadata(
+        month_metadata = gcs.ensure_month_metadata(
             player, year, month, archive_url
         )
 
     logger.info("Processing archive: %s", archive_url)
     monthly_games = client.get_monthly_games(archive_url)
 
-    processed = 0
-    failed = 0
-    skipped_games = 0
+    missing_link_games, candidate_games, skipped_games = _partition_raw_games(
+        monthly_games,
+        month_metadata,
+    )
 
-    for game in monthly_games:
-        uuid = game.get("uuid")
-        if uuid and metadata.is_game_processed(month_metadata, str(uuid).strip()):
-            skipped_games += 1
-            continue
+    if missing_link_games:
+        gcs.save_missing_link_pgns_concurrent(missing_link_games, year, month)
 
-        if process_game(game, month_metadata, year, month):
-            processed += 1
-        else:
-            failed += 1
+    parsed_games, parse_failures = _parse_candidate_games(candidate_games)
+    processed, write_failures = _persist_parsed_games(
+        parsed_games,
+        month_metadata,
+        year,
+        month,
+    )
+    failed = len(missing_link_games) + parse_failures + write_failures
 
     if not is_current_month and failed == 0:
         month_metadata["is_complete"] = True
     else:
         month_metadata["is_complete"] = False
 
-    metadata.save_month_metadata(month_metadata)
+    gcs.save_month_metadata(month_metadata)
 
     month_result = {
         "processed": processed,
@@ -173,28 +291,28 @@ def select_archive_urls(
 
 
 def run_pipeline() -> Dict[str, int]:
-    """Run the incremental download and storage workflow.
+    """Run the incremental download and cloud persistence workflow.
 
     Returns:
         pipeline_totals (Dict[str, int]): Summary counters for processed months and games.
     """
     player = config.PLAYER
-    games.ensure_data_directories()
-    games.load_csv_uuids()
+    gcs.ensure_bucket()
+    bq.ensure_dataset_and_table()
 
     now = datetime.now(timezone.utc)
     current_year = now.year
     current_month = now.month
 
-    master_metadata = metadata.load_master_metadata()
+    master_metadata = gcs.load_master_metadata()
     if master_metadata is None:
-        master_metadata = metadata.create_master_metadata()
+        master_metadata = gcs.create_master_metadata()
     last_year = master_metadata.get("last_metadata_year")
     last_month = master_metadata.get("last_metadata_month")
 
     last_month_metadata = None
     if last_year is not None and last_month is not None:
-        last_month_metadata = metadata.load_month_metadata(last_year, last_month)
+        last_month_metadata = gcs.load_month_metadata(last_year, last_month)
         if last_month_metadata:
             logger.info(
                 "Loaded last executed month metadata: %04d-%02d",
@@ -213,8 +331,8 @@ def run_pipeline() -> Dict[str, int]:
 
     if not archives_to_process:
         logger.info("No archives to process")
-        metadata.update_master_metadata(master_metadata, current_year, current_month)
-        metadata.save_master_metadata(master_metadata)
+        gcs.update_master_metadata(master_metadata, current_year, current_month)
+        gcs.save_master_metadata(master_metadata)
         empty_totals = {
             "months_processed": 0,
             "games_processed": 0,
@@ -235,7 +353,8 @@ def run_pipeline() -> Dict[str, int]:
         "games_skipped": 0,
     }
 
-    for archive_url in archives_to_process:
+    archive_items = archives_to_process
+    for archive_url in archive_items:
         year, month = parser.parse_archive_year_month(archive_url)
         preloaded = None
         if (
@@ -257,8 +376,8 @@ def run_pipeline() -> Dict[str, int]:
         totals["games_failed"] += result["failed"]
         totals["games_skipped"] += result["skipped_games"]
 
-    metadata.update_master_metadata(master_metadata, current_year, current_month)
-    metadata.save_master_metadata(master_metadata)
+    gcs.update_master_metadata(master_metadata, current_year, current_month)
+    gcs.save_master_metadata(master_metadata)
 
     logger.info(
         "Pipeline complete: months_processed=%d, "

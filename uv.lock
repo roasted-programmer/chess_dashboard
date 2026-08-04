@@ -191,6 +191,7 @@ name = "chess-analysis-dashboard"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "google-cloud-bigquery" },
     { name = "google-cloud-secret-manager" },
     { name = "google-cloud-storage" },
     { name = "ipykernel" },
@@ -207,6 +208,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "google-cloud-bigquery", specifier = ">=3.42.3" },
     { name = "google-cloud-secret-manager", specifier = ">=2.30.0" },
     { name = "google-cloud-storage", specifier = ">=3.13.0" },
     { name = "ipykernel", specifier = ">=7.3.0" },
@@ -350,6 +352,29 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c7/33/dbc946a407401b975f0719658f18e664ece2109f79ffd1ff3bf226c205f4/google_auth-2.56.2.tar.gz", hash = "sha256:e28f103ca8091fb7012b99c44243d7366c29863713b8e34a220c3322b7a07051", size = 365820, upload-time = "2026-07-21T21:53:28.188Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/63/50636aae68c9bf17c891c7eb18b49baa9bd6b31d2a97b8de4813a9fc8d1c/google_auth-2.56.2-py3-none-any.whl", hash = "sha256:c8270ea95b2697b74e3d8438ae9c5b898e38b623b915c7b5c5635921e7de68a6", size = 258588, upload-time = "2026-07-21T21:53:26.399Z" },
+]
+
+[package.optional-dependencies]
+pyopenssl = [
+    { name = "cryptography" },
+]
+
+[[package]]
+name = "google-cloud-bigquery"
+version = "3.42.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth", extra = ["pyopenssl"] },
+    { name = "google-cloud-core" },
+    { name = "google-resumable-media" },
+    { name = "packaging" },
+    { name = "python-dateutil" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0a/53/6a9c19cde15ffe3f218653e4f11d08b2ef97dad78c07c473bc95f8ce7aa9/google_cloud_bigquery-3.42.3.tar.gz", hash = "sha256:d03f8da5ed94aeae5457f3127216cb385392ba266bede25ea257aeec94512900", size = 518359, upload-time = "2026-07-30T18:15:19.314Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/fe/a862130426b56c062dcbc2fcb5a9e4bec9fea9193821718d718f9f10be61/google_cloud_bigquery-3.42.3-py3-none-any.whl", hash = "sha256:81b9bfa3a5fa098a04351c1a12579d16f28b93b836e4556ef6410a01deebf418", size = 264652, upload-time = "2026-07-30T18:15:17.549Z" },
 ]
 
 [[package]]

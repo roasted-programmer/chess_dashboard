@@ -1,52 +1,80 @@
-"""Tests for configuration and pipeline coordination."""
+"""Tests for pipeline coordination with mocked GCP persistence."""
 
-import csv
-from unittest.mock import patch
+import json
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.config import ConfigurationError, _load_player
-from src.local_storage import games, metadata
-from src.pipeline import process_month, run_pipeline, select_archive_urls
+from src import config
+from src.gcp import bigquery as bq
+from src.gcp import gcs
+from src.pipeline import process_game, process_month, run_pipeline, select_archive_urls
 
 SAMPLE_PGN_WITH_LINK = (
     '[White "w"]\n'
-    '[Link "https://www.chess.com/game/live/1234567890"]\n\n'
+    '[Black "b"]\n'
+    '[Result "1-0"]\n'
+    '[Link "https://www.chess.com/game/live/1234567890"]\n'
+    '[UTCDate "2026.08.01"]\n'
+    '[UTCTime "12:00:00"]\n'
+    '[WhiteElo "1500"]\n'
+    '[BlackElo "1500"]\n'
+    '[TimeControl "600"]\n'
+    '[Termination "w won"]\n'
+    '[ECOUrl "https://www.chess.com/openings/Sicilian-Defense"]\n\n'
     "1. e4 1-0"
 )
 
 
-def _patch_storage(tmp_path, monkeypatch):
-    monkeypatch.setattr(games, "DATA_DIR", tmp_path / "data")
-    monkeypatch.setattr(games, "PGN_DIR", tmp_path / "data" / "pgns")
-    monkeypatch.setattr(games, "CSV_DIR", tmp_path / "data" / "csv")
-    monkeypatch.setattr(games, "GAMES_CSV_PATH", tmp_path / "data" / "csv" / "games.csv")
-    monkeypatch.setattr(
-        games, "MISSING_LINK_DIR", tmp_path / "data" / "temp" / "missing-link"
-    )
-    monkeypatch.setattr(metadata, "METADATA_DIR", tmp_path / "data" / "metadata")
-    monkeypatch.setattr(
-        metadata, "MASTER_METADATA_PATH", tmp_path / "data" / "metadata" / "master.json"
-    )
-    games.reset_csv_uuid_cache()
+def _set_settings(monkeypatch):
+    config.reset_settings_cache()
+    gcs.reset_gcs_clients()
+    bq.reset_bq_client()
+    monkeypatch.setenv("PLAYER", "testplayer")
+    monkeypatch.setenv("GCP_PROJECT_ID", "demo-project")
+    monkeypatch.setenv("GCP_PROJECT_NUMBER", "123456789")
+    monkeypatch.setenv("LOCATION", "us-central1")
+    monkeypatch.setenv("GCS_BASE_BUCKET_NAME", "chess-data")
+    monkeypatch.setenv("BQ_DATASET_NAME", "chess")
+    monkeypatch.setenv("BQ_TABLE_NAME", "games")
+    monkeypatch.setattr("src.config.load_dotenv", lambda *args, **kwargs: None)
 
 
-def test_missing_player_raises_configuration_error(monkeypatch):
-    monkeypatch.delenv("PLAYER", raising=False)
-    monkeypatch.setattr(
-        "src.config.load_dotenv", lambda *args, **kwargs: None
-    )
-    with pytest.raises(ConfigurationError, match="PLAYER environment variable is required"):
-        _load_player()
+@pytest.fixture(autouse=True)
+def _settings(monkeypatch):
+    _set_settings(monkeypatch)
+    yield
+    config.reset_settings_cache()
+    gcs.reset_gcs_clients()
+    bq.reset_bq_client()
 
 
-def test_blank_player_raises_configuration_error(monkeypatch):
-    monkeypatch.setenv("PLAYER", "   ")
-    monkeypatch.setattr(
-        "src.config.load_dotenv", lambda *args, **kwargs: None
-    )
-    with pytest.raises(ConfigurationError, match="PLAYER environment variable is required"):
-        _load_player()
+def _mock_cloud_storage(stored=None):
+    if stored is None:
+        stored = {}
+    mock_bucket = MagicMock()
+
+    def _blob(path):
+        blob = MagicMock()
+        blob.exists.side_effect = lambda: path in stored
+
+        def _download(encoding="utf-8"):
+            return stored[path]
+
+        def _upload(content, content_type=None, if_generation_match=None):
+            if if_generation_match == 0 and path in stored:
+                from google.api_core.exceptions import PreconditionFailed
+
+                raise PreconditionFailed("exists")
+            stored[path] = content
+
+        blob.download_as_text.side_effect = _download
+        blob.upload_from_string.side_effect = _upload
+        return blob
+
+    mock_bucket.blob.side_effect = _blob
+    mock_bucket.list_blobs.return_value = []
+    return mock_bucket, stored
 
 
 def test_select_archives_when_current_equals_last_executed():
@@ -81,76 +109,127 @@ def test_select_archives_on_first_run():
     assert selected == archives
 
 
-def test_current_month_remains_updateable(tmp_path, monkeypatch):
-    _patch_storage(tmp_path, monkeypatch)
-    games.ensure_data_directories()
-
-    archive_url = "https://api.chess.com/pub/player/test/games/2026/08"
+def test_current_month_remains_updateable():
+    mock_bucket, stored = _mock_cloud_storage()
     sample_game = {
         "uuid": "new-game-uuid",
         "pgn": SAMPLE_PGN_WITH_LINK,
+        "rules": "chess",
     }
 
-    with patch(
-        "src.pipeline.client.get_monthly_games", return_value=[sample_game]
-    ):
-        result = process_month(archive_url, 2026, 8, "test")
+    with patch("src.gcp.gcs.ensure_bucket", return_value=mock_bucket):
+        with patch("src.pipeline.bq.existing_uuids", return_value=set()):
+            with patch("src.pipeline.bq.insert_games", return_value={"new-game-uuid"}):
+                with patch(
+                    "src.pipeline.client.get_monthly_games", return_value=[sample_game]
+                ):
+                    result = process_month(
+                        "https://api.chess.com/pub/player/test/games/2026/08",
+                        2026,
+                        8,
+                        "test",
+                    )
 
     assert result["failed"] == 0
-    saved = metadata.load_month_metadata(2026, 8)
+    saved = json.loads(stored["metadata/2026-08.json"])
     assert saved["is_complete"] is False
     assert "new-game-uuid" in saved["processed_game_uuids"]
+    assert "pgns/2026-08-new-game-uuid.pgn" in stored
 
 
-def test_existing_uuid_is_skipped(tmp_path, monkeypatch):
-    _patch_storage(tmp_path, monkeypatch)
+def test_existing_uuid_is_skipped():
+    month_data = gcs.create_month_metadata(
+        "test", 2026, 7, "https://api.chess.com/pub/player/test/games/2026/07"
+    )
+    gcs.record_processed_game(month_data, "existing-uuid")
+    sample_game = {"uuid": "existing-uuid", "pgn": SAMPLE_PGN_WITH_LINK}
 
-    archive_url = "https://api.chess.com/pub/player/test/games/2026/07"
-    month_data = metadata.create_month_metadata("test", 2026, 7, archive_url)
-    metadata.record_processed_game(month_data, "existing-uuid")
-    metadata.save_month_metadata(month_data)
-
-    sample_game = {
-        "uuid": "existing-uuid",
-        "pgn": SAMPLE_PGN_WITH_LINK,
-    }
-
-    with patch(
-        "src.pipeline.client.get_monthly_games", return_value=[sample_game]
-    ):
-        result = process_month(
-            archive_url, 2026, 8, "test", month_metadata=month_data
-        )
+    with patch("src.pipeline.bq.insert_games") as mock_insert:
+        with patch(
+            "src.pipeline.client.get_monthly_games", return_value=[sample_game]
+        ):
+            with patch("src.pipeline.gcs.save_month_metadata"):
+                result = process_month(
+                    "https://api.chess.com/pub/player/test/games/2026/07",
+                    2026,
+                    8,
+                    "test",
+                    month_metadata=month_data,
+                )
 
     assert result["skipped_games"] == 1
     assert result["failed"] == 0
+    mock_insert.assert_not_called()
 
 
-def test_game_missing_link_is_saved_for_review(tmp_path, monkeypatch):
-    _patch_storage(tmp_path, monkeypatch)
-    games.ensure_data_directories()
+def test_game_missing_link_is_saved_for_review():
+    mock_bucket, stored = _mock_cloud_storage()
+    sample_game = {"uuid": "missing-link-game", "pgn": '[White "a"]\n\n1. e4 1-0'}
 
-    archive_url = "https://api.chess.com/pub/player/test/games/2026/08"
-    sample_game = {
-        "uuid": "missing-link-game",
-        "pgn": '[White "a"]\n\n1. e4 1-0',
-    }
-
-    with patch(
-        "src.pipeline.client.get_monthly_games", return_value=[sample_game]
-    ):
-        result = process_month(archive_url, 2026, 8, "test")
+    with patch("src.gcp.gcs.ensure_bucket", return_value=mock_bucket):
+        with patch(
+            "src.pipeline.client.get_monthly_games", return_value=[sample_game]
+        ):
+            result = process_month(
+                "https://api.chess.com/pub/player/test/games/2026/08",
+                2026,
+                8,
+                "test",
+            )
 
     assert result["failed"] == 1
-    missing_link_path = (
-        tmp_path / "data" / "temp" / "missing-link" / "2026-08-missing-link-game.pgn"
+    assert "temp/missing-link/2026-08-missing-link-game.pgn" in stored
+
+
+def test_failed_cloud_write_does_not_record_metadata():
+    month_data = gcs.create_month_metadata(
+        "test", 2026, 8, "https://api.chess.com/pub/player/test/games/2026/08"
     )
-    assert missing_link_path.is_file()
+    sample_game = {
+        "uuid": "fail-game",
+        "pgn": SAMPLE_PGN_WITH_LINK,
+        "rules": "chess",
+    }
+
+    with patch("src.pipeline.bq.game_artifacts_exist", return_value=False):
+        with patch("src.pipeline.gcs.upload_pgn", return_value="pgns/x.pgn"):
+            with patch(
+                "src.pipeline.bq.insert_game", side_effect=RuntimeError("bq down")
+            ):
+                processed = process_game(sample_game, month_data, 2026, 8)
+
+    assert processed is False
+    assert "fail-game" not in month_data["processed_game_uuids"]
+
+
+def test_batch_write_failure_does_not_record_metadata():
+    mock_bucket, stored = _mock_cloud_storage()
+    sample_game = {
+        "uuid": "fail-game",
+        "pgn": SAMPLE_PGN_WITH_LINK,
+        "rules": "chess",
+    }
+
+    with patch("src.gcp.gcs.ensure_bucket", return_value=mock_bucket):
+        with patch("src.pipeline.bq.existing_uuids", return_value=set()):
+            with patch("src.pipeline.bq.insert_games", return_value=set()):
+                with patch(
+                    "src.pipeline.client.get_monthly_games",
+                    return_value=[sample_game],
+                ):
+                    result = process_month(
+                        "https://api.chess.com/pub/player/test/games/2026/08",
+                        2026,
+                        8,
+                        "test",
+                    )
+
+    assert result["failed"] == 1
+    saved = json.loads(stored["metadata/2026-08.json"])
+    assert "fail-game" not in saved["processed_game_uuids"]
 
 
 def test_api_requests_include_required_headers():
-    from unittest.mock import MagicMock, patch
-
     from src.config import REQUEST_HEADERS
 
     mock_response = MagicMock()
@@ -169,14 +248,11 @@ def test_api_requests_include_required_headers():
     assert call_kwargs["headers"]["User-Agent"] == "Tool"
 
 
-def test_run_pipeline_skips_older_months_with_master(tmp_path, monkeypatch):
-    _patch_storage(tmp_path, monkeypatch)
-    monkeypatch.setattr("src.config._PLAYER", "testplayer")
-    games.ensure_data_directories()
-
-    master = metadata.create_master_metadata()
-    metadata.update_master_metadata(master, 2026, 8)
-    metadata.save_master_metadata(master)
+def test_run_pipeline_skips_older_months_with_master():
+    mock_bucket, stored = _mock_cloud_storage()
+    master = gcs.create_master_metadata()
+    gcs.update_master_metadata(master, 2026, 8)
+    stored["metadata/master.json"] = json.dumps(master)
 
     archives = [
         "https://api.chess.com/pub/player/test/games/2026/06",
@@ -185,27 +261,34 @@ def test_run_pipeline_skips_older_months_with_master(tmp_path, monkeypatch):
     sample_game = {
         "uuid": "pipeline-game",
         "pgn": SAMPLE_PGN_WITH_LINK,
+        "rules": "chess",
     }
 
-    with patch("src.pipeline.client.get_archive_urls", return_value=archives):
-        with patch(
-            "src.pipeline.client.get_monthly_games", return_value=[sample_game]
-        ) as mock_monthly:
-            totals = run_pipeline()
+    with patch("src.gcp.gcs.ensure_bucket", return_value=mock_bucket):
+        with patch("src.pipeline.bq.ensure_dataset_and_table"):
+            with patch("src.pipeline.bq.existing_uuids", return_value=set()):
+                with patch(
+                    "src.pipeline.bq.insert_games", return_value={"pipeline-game"}
+                ):
+                    with patch(
+                        "src.pipeline.client.get_archive_urls", return_value=archives
+                    ):
+                        with patch(
+                            "src.pipeline.client.get_monthly_games",
+                            return_value=[sample_game],
+                        ) as mock_monthly:
+                            totals = run_pipeline()
 
     mock_monthly.assert_called_once()
     assert totals["months_processed"] == 1
     assert totals["games_processed"] == 1
 
 
-def test_run_pipeline_processes_gap_months(tmp_path, monkeypatch):
-    _patch_storage(tmp_path, monkeypatch)
-    monkeypatch.setattr("src.config._PLAYER", "testplayer")
-    games.ensure_data_directories()
-
-    master = metadata.create_master_metadata()
-    metadata.update_master_metadata(master, 2026, 6)
-    metadata.save_master_metadata(master)
+def test_run_pipeline_processes_gap_months():
+    mock_bucket, stored = _mock_cloud_storage()
+    master = gcs.create_master_metadata()
+    gcs.update_master_metadata(master, 2026, 6)
+    stored["metadata/master.json"] = json.dumps(master)
 
     archives = [
         "https://api.chess.com/pub/player/test/games/2026/06",
@@ -215,45 +298,58 @@ def test_run_pipeline_processes_gap_months(tmp_path, monkeypatch):
     sample_game = {
         "uuid": "pipeline-game",
         "pgn": SAMPLE_PGN_WITH_LINK,
+        "rules": "chess",
     }
 
-    with patch("src.pipeline.client.get_archive_urls", return_value=archives):
-        with patch(
-            "src.pipeline.client.get_monthly_games", return_value=[sample_game]
-        ) as mock_monthly:
-            totals = run_pipeline()
+    with patch("src.gcp.gcs.ensure_bucket", return_value=mock_bucket):
+        with patch("src.pipeline.bq.ensure_dataset_and_table"):
+            with patch("src.pipeline.bq.existing_uuids", return_value=set()):
+                with patch(
+                    "src.pipeline.bq.insert_games", return_value={"pipeline-game"}
+                ):
+                    with patch(
+                        "src.pipeline.client.get_archive_urls", return_value=archives
+                    ):
+                        with patch(
+                            "src.pipeline.client.get_monthly_games",
+                            return_value=[sample_game],
+                        ) as mock_monthly:
+                            totals = run_pipeline()
 
     assert mock_monthly.call_count == 3
     assert totals["months_processed"] == 3
-
-    saved_master = metadata.load_master_metadata()
+    saved_master = json.loads(stored["metadata/master.json"])
     assert saved_master["last_metadata_file"] == "2026-08"
 
 
-def test_run_pipeline_integration(tmp_path, monkeypatch):
-    _patch_storage(tmp_path, monkeypatch)
-    monkeypatch.setattr("src.config._PLAYER", "testplayer")
-
+def test_run_pipeline_integration():
+    mock_bucket, stored = _mock_cloud_storage()
     archives = ["https://api.chess.com/pub/player/test/games/2026/08"]
     sample_game = {
         "uuid": "pipeline-game",
         "pgn": SAMPLE_PGN_WITH_LINK,
+        "rules": "chess",
     }
 
-    with patch("src.pipeline.client.get_archive_urls", return_value=archives):
-        with patch(
-            "src.pipeline.client.get_monthly_games", return_value=[sample_game]
-        ):
-            totals = run_pipeline()
+    with patch("src.gcp.gcs.ensure_bucket", return_value=mock_bucket):
+        with patch("src.pipeline.bq.ensure_dataset_and_table"):
+            with patch("src.pipeline.bq.existing_uuids", return_value=set()):
+                with patch(
+                    "src.pipeline.bq.insert_games", return_value={"pipeline-game"}
+                ) as mock_insert:
+                    with patch(
+                        "src.pipeline.client.get_archive_urls", return_value=archives
+                    ):
+                        with patch(
+                            "src.pipeline.client.get_monthly_games",
+                            return_value=[sample_game],
+                        ):
+                            totals = run_pipeline()
 
     assert totals["games_processed"] == 1
-    assert (tmp_path / "data" / "pgns" / "2026-08-pipeline-game.pgn").is_file()
-    csv_path = tmp_path / "data" / "csv" / "games.csv"
-    assert csv_path.is_file()
-    with csv_path.open(encoding="utf-8", newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    assert len(rows) == 1
-    assert rows[0]["uuid"] == "pipeline-game"
-
-    saved_master = metadata.load_master_metadata()
+    assert "pgns/2026-08-pipeline-game.pgn" in stored
+    mock_insert.assert_called_once()
+    month_meta = json.loads(stored["metadata/2026-08.json"])
+    assert "pipeline-game" in month_meta["processed_game_uuids"]
+    saved_master = json.loads(stored["metadata/master.json"])
     assert saved_master["last_metadata_file"] == "2026-08"

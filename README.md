@@ -1,16 +1,34 @@
 # Chess.com Game Data Pipeline
 
-Downloads Chess.com games for a configured player, parses selected game information, stores PGN and CSV files locally, and supports incremental updates without reprocessing completed historical months.
+Downloads Chess.com games for a configured player, parses selected game information, stores PGN files and monthly metadata in Google Cloud Storage, inserts structured game rows into BigQuery, and supports incremental updates without reprocessing completed historical months.
 
 ## Setup
 
-1. Copy or create a `.env` file in the project root with your Chess.com username:
+1. Create a `.env` file in the project root:
 
 ```env
 PLAYER=your_username
+GCP_PROJECT_ID=your-project-id
+GCP_PROJECT_NUMBER=your-project-number
+LOCATION=us-central1
+GCS_BASE_BUCKET_NAME=chess-data
+BQ_DATASET_NAME=chess
+BQ_TABLE_NAME=games
 ```
 
-2. Install dependencies:
+The GCS bucket name is constructed as:
+
+```text
+{GCS_BASE_BUCKET_NAME}-{GCP_PROJECT_NUMBER}-{LOCATION}
+```
+
+2. Authenticate with Application Default Credentials:
+
+```bash
+gcloud auth application-default login
+```
+
+3. Install dependencies:
 
 ```bash
 uv sync
@@ -24,23 +42,31 @@ Run the pipeline:
 uv run python main.py
 ```
 
-The application creates data under:
+## Storage Layout
+
+### Google Cloud Storage
 
 ```text
-data/pgns/       # one PGN file per game
-data/csv/        # games.csv (all games appended incrementally)
-data/metadata/   # master.json plus one JSON file per month
+pgns/{year}-{month}-{uuid}.pgn
+metadata/{year}-{month}.json
+metadata/master.json
+temp/missing-link/{year}-{month}-{uuid}.pgn
+```
+
+### BigQuery
+
+```text
+{GCP_PROJECT_ID}.{BQ_DATASET_NAME}.{BQ_TABLE_NAME}
 ```
 
 ## Behavior
 
-- **`data/metadata/master.json`** tracks the last UTC run time and the last processed year-month.
+- **`metadata/master.json`** tracks the last UTC run time and the last processed year-month.
 - On each run, only archives from the last executed month (inclusive) through the current UTC month are requested.
 - When the current month equals the last executed month, only that month is refreshed.
 - When the current month is later, every month from the last executed through the current month is processed to catch gaps.
-- At startup the pipeline reads only **master.json** and the last executed month metadata file to determine what to process.
-- **Game UUIDs** are recorded in monthly metadata only after the PGN file is stored and the game row is appended to `games.csv`.
-- **Metadata files** are saved atomically to support safe resumption after interruption.
+- **Game UUIDs** are recorded in monthly metadata only after the PGN upload and BigQuery insertion both succeed.
+- If a cloud write fails, the UUID is not marked processed and the month is not marked complete.
 
 ## Tests
 
@@ -48,13 +74,15 @@ data/metadata/   # master.json plus one JSON file per month
 uv run pytest
 ```
 
+Tests mock Google Cloud clients and do not require real GCP access.
+
 ## Project Structure
 
 ```text
 main.py                 # application entrypoint
-src/config.py           # environment and path configuration
+src/config.py           # environment configuration
 src/pipeline.py         # workflow coordination
 src/chess_com/          # API client and parsing
-src/local_storage/      # PGN, CSV, and metadata persistence
+src/gcp/                # GCS and BigQuery persistence
 tests/                  # focused unit tests
 ```
